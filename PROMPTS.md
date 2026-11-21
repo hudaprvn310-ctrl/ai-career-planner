@@ -15,9 +15,6 @@ Don't change anything else.
 
 ## Card 2 — The form (Checkpoint 2)
 ```
-Replace the box with the name input with a form titled "About you". The form asks for:
-- Your name (text)
-- Highest education (dropdown: Plus Two / 12th, Diploma, B.Tech / B.E., B.Sc / BCA, B.Com / BBA, BA, Master's degree, Other)
 - Where are you right now? (radio buttons side by side: Student, Graduate looking for a job, Working, want to switch, Career break)
 - Skills you already have (text area)
 - What do you enjoy? (text area)
@@ -33,18 +30,6 @@ Keep the page style, the title and the footer.
 ---
 
 ## Card 3 — Connect the AI (Checkpoint 3)
-Write your own prompt first, then paste it where it says.
-```
-Connect my form to Gemini.
-1. At the top of app.py, add a variable SYSTEM_PROMPT with exactly this text:
-"""
-[PASTE YOUR PROMPT HERE]
-"""
-2. When the form is submitted and nothing is missing, send all the form answers to Gemini
-   with SYSTEM_PROMPT, using the Gemini pattern in .github/copilot-instructions.md.
-3. Show a spinner "Thinking about your career..." while waiting.
-4. Replace the JSON with the AI's answer, shown as Markdown in a bordered box.
-5. If anything fails, show a friendly error message instead of crashing.
 ```
 
 ### Prompt-writing template (fill the blanks)
@@ -103,13 +88,15 @@ Keep everything that already works. Use only streamlit and google-genai.
 ---
 
 ## Card E — Explain it (use any time)
+-
 ```
-Explain [the part of app.py that ____] in simple English for someone who has never coded.
-Use at most 5 short bullet points. Don't change any code.
 ```
 
 ## Card F — Fix an error (at most twice, then ask your helper)
 ```
-After my last change, the app shows this error: [paste the red error text].
+After my last change, the app shows this error: [paste the redReplace the box with the name input with a form titled "About you". The form asks for:
+- Your name (text)
+- Highest education (dropdown: Plus Two / 12th, Diploma, B.Tech / B.E., B.Sc / BCA, B.Com / BBA, BA, Master's degree, Other)
+ error text].
 Fix only this error. Don't change anything else.
 ```
