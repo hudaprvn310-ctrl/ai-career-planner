@@ -81,6 +81,30 @@ CAREER_PLAN_SCHEMA = {
     "required": ["roles", "skill_gaps", "roadmap", "todays_action"],
 }
 
+# Schema for the interview question generator.
+INTERVIEW_QUESTIONS_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "questions": {
+            "type": "ARRAY",
+            "minItems": 10,
+            "maxItems": 10,
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "question": {"type": "STRING"},
+                    "difficulty": {
+                        "type": "STRING",
+                        "enum": ["Simple", "Intermediate"],
+                    },
+                },
+                "required": ["question", "difficulty"],
+            },
+        }
+    },
+    "required": ["questions"],
+}
+
 
 def create_gemini_client():
     return genai.Client(
@@ -159,6 +183,38 @@ def parse_career_plan(answer):
     if not isinstance(plan.get("todays_action"), str) or not plan["todays_action"].strip():
         raise ValueError("The plan is missing today's action.")
     return plan
+
+
+# Check that Gemini returned ten unique, well-labeled questions.
+def parse_interview_questions(answer):
+    result = json.loads(answer)
+    if not isinstance(result, dict) or not isinstance(result.get("questions"), list):
+        raise ValueError("The questions must be returned as a list.")
+    questions = result["questions"]
+    if len(questions) != 10:
+        raise ValueError("The response must include exactly ten questions.")
+
+    seen_questions = set()
+    has_simple = False
+    has_intermediate = False
+    for item in questions:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"question", "difficulty"}
+            or not isinstance(item["question"], str)
+            or not item["question"].strip()
+            or item["difficulty"] not in ("Simple", "Intermediate")
+        ):
+            raise ValueError("A question is missing its text or difficulty.")
+        normalized_question = " ".join(item["question"].casefold().split()).rstrip("?.!")
+        if normalized_question in seen_questions:
+            raise ValueError("The response contains duplicate questions.")
+        seen_questions.add(normalized_question)
+        has_simple = has_simple or item["difficulty"] == "Simple"
+        has_intermediate = has_intermediate or item["difficulty"] == "Intermediate"
+    if not has_simple or not has_intermediate:
+        raise ValueError("The response must include both difficulty levels.")
+    return questions
 
 
 def plan_as_markdown(plan):
@@ -404,6 +460,63 @@ if "career_plan" in st.session_state and isinstance(st.session_state["career_pla
             st.write(user_question)
         with st.chat_message("assistant"):
             st.write(assistant_answer)
+
+# Generate and keep role-specific interview questions.
+st.divider()
+st.subheader("Interview Questions")
+job_title = st.text_input(
+    "Desired job title",
+    placeholder="Python Developer, Data Analyst, Web Developer...",
+    max_chars=120,
+)
+generate_questions = st.button("Generate Questions")
+regenerate_questions = False
+if st.session_state.get("interview_questions"):
+    regenerate_questions = st.button("Regenerate Questions")
+
+if generate_questions or regenerate_questions:
+    if not job_title.strip():
+        st.warning("Enter a job title before generating questions.")
+    else:
+        question_prompt = (
+            "Create exactly 10 commonly asked interview questions for this job title: "
+            f"{job_title.strip()}. Keep them relevant and beginner-friendly, from Simple "
+            "to Intermediate difficulty. Include both technical and conceptual topics, "
+            "covering important role-related skills, tools, technologies, and basic "
+            "practical concepts. Avoid duplicates and advanced or expert-level topics. "
+            "Return only the questions and their difficulty labels in the required JSON "
+            "format. Do not include answers, explanations, hints, or solutions."
+        )
+        try:
+            client = create_gemini_client()
+            with st.spinner("Generating interview questions..."):
+                answer = generate_text(
+                    client,
+                    question_prompt,
+                    "You generate interview questions only. Follow the requested role, "
+                    "difficulty limits, and JSON schema exactly.",
+                    response_schema=INTERVIEW_QUESTIONS_SCHEMA,
+                )
+            st.session_state["interview_questions"] = parse_interview_questions(answer)
+            st.session_state["interview_questions_job_title"] = job_title.strip()
+        except KeyError:
+            st.error("The Gemini API key is missing. Add it to .streamlit/secrets.toml and try again.")
+        except errors.APIError as exc:
+            if exc.code in (429, 500, 503, 504):
+                st.error("Gemini is busy or has reached its free limit. Please wait a moment and try again.")
+            elif exc.code in (401, 403):
+                st.error("The Gemini API key is not accepted. Check that it is a valid key and try again.")
+            elif exc.code == 404:
+                st.error("The Gemini model is not available for this API key. Please try again later.")
+            else:
+                st.error("I couldn't generate interview questions right now. Please try again in a moment.")
+        except (json.JSONDecodeError, ValueError):
+            st.error("Gemini returned questions in an unexpected format. Please try again.")
+
+if st.session_state.get("interview_questions"):
+    st.caption(f"Questions for: {st.session_state['interview_questions_job_title']}")
+    for number, item in enumerate(st.session_state["interview_questions"], start=1):
+        st.markdown(f"{number}. **{item['difficulty']}**: {item['question']}")
 
 # Footer
 st.divider()
