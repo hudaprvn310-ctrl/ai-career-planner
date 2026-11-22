@@ -3,6 +3,8 @@
 # in the preview on the right, your setup is done.
 # It uses the same page layout as the final app, so the look never changes.
 
+import json
+
 import streamlit as st
 from google import genai
 from google.genai import errors, types
@@ -10,18 +12,183 @@ from google.genai import errors, types
 # Prompt for Gemini
 SYSTEM_PROMPT = """
 You are a friendly and honest career counsellor for students and job seekers in India.
-Given a person's profile, reply in Markdown with exactly these sections:
-## 3 roles that fit you
-For each role, give the role name, why it fits the person, and an indicative salary range in LPA.
-## Your skill gaps
-Give a table with columns: Skill, Current level, Level to aim for, and Free resource.
-## Your 90-day roadmap
-Split the plan into Days 1-30, Days 31-60, and Days 61-90. Give 3 practical tasks for each period.
-## One thing to do today
-Suggest one small task that can be completed in under 30 minutes.
+Create a realistic beginner-friendly career plan with exactly 3 roles, 4 to 6 skill gaps,
+and a 90-day roadmap split into Days 1-30, Days 31-60, and Days 61-90, with 3 tasks
+and one mini project in each period. Suggest one action that can be completed in under
+30 minutes today. Follow the provided JSON schema exactly.
 Rules: Never promise a job or a fixed salary. Label every salary as indicative. Use simple English.
 Keep the answer under 450 words and give advice that is realistic for a beginner.
 """
+
+ROADMAP_PERIOD_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "tasks": {
+            "type": "ARRAY",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {"type": "STRING"},
+        },
+        "mini_project": {"type": "STRING"},
+    },
+    "required": ["tasks", "mini_project"],
+}
+
+CAREER_PLAN_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "roles": {
+            "type": "ARRAY",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "title": {"type": "STRING"},
+                    "why_it_fits": {"type": "STRING"},
+                    "match_score": {"type": "INTEGER", "minimum": 0, "maximum": 100},
+                    "salary_range_lpa": {"type": "STRING"},
+                },
+                "required": ["title", "why_it_fits", "match_score", "salary_range_lpa"],
+            },
+        },
+        "skill_gaps": {
+            "type": "ARRAY",
+            "minItems": 4,
+            "maxItems": 6,
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "skill": {"type": "STRING"},
+                    "current_level": {"type": "INTEGER", "minimum": 0, "maximum": 10},
+                    "needed_level": {"type": "INTEGER", "minimum": 0, "maximum": 10},
+                    "free_resource": {"type": "STRING"},
+                },
+                "required": ["skill", "current_level", "needed_level", "free_resource"],
+            },
+        },
+        "roadmap": {
+            "type": "OBJECT",
+            "properties": {
+                "days_1_30": ROADMAP_PERIOD_SCHEMA,
+                "days_31_60": ROADMAP_PERIOD_SCHEMA,
+                "days_61_90": ROADMAP_PERIOD_SCHEMA,
+            },
+            "required": ["days_1_30", "days_31_60", "days_61_90"],
+        },
+        "todays_action": {"type": "STRING"},
+    },
+    "required": ["roles", "skill_gaps", "roadmap", "todays_action"],
+}
+
+
+def create_gemini_client():
+    return genai.Client(
+        api_key=st.secrets["GEMINI_API_KEY"],
+        http_options=types.HttpOptions(api_version="v1beta"),
+    )
+
+
+def generate_text(client, contents, system_instruction, response_schema=None):
+    last_error = None
+    for model, attempts in [("gemini-3.5-flash-lite", 2)]:
+        for _ in range(attempts):
+            try:
+                config = types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.7,
+                    response_mime_type="application/json" if response_schema else None,
+                    response_schema=response_schema,
+                )
+                response = client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=config,
+                )
+                if not response.text:
+                    raise ValueError("Gemini returned an empty answer.")
+                return response.text
+            except errors.APIError as exc:
+                if exc.code not in (429, 500, 503, 504):
+                    raise
+                last_error = exc
+    if last_error:
+        raise last_error
+    raise RuntimeError("Gemini returned no answer.")
+
+
+def parse_career_plan(answer):
+    plan = json.loads(answer)
+    if not isinstance(plan, dict):
+        raise ValueError("The plan must be a JSON object.")
+    if not isinstance(plan.get("roles"), list) or len(plan["roles"]) != 3:
+        raise ValueError("The plan must include exactly three roles.")
+    for role in plan["roles"]:
+        if not isinstance(role, dict) or not all(
+            isinstance(role.get(field), str)
+            for field in ("title", "why_it_fits", "salary_range_lpa")
+        ):
+            raise ValueError("A role is missing required text.")
+        if type(role.get("match_score")) is not int or not 0 <= role["match_score"] <= 100:
+            raise ValueError("A role has an invalid match score.")
+    if not isinstance(plan.get("skill_gaps"), list) or not 4 <= len(plan["skill_gaps"]) <= 6:
+        raise ValueError("The plan must include four to six skill gaps.")
+    for gap in plan["skill_gaps"]:
+        if not isinstance(gap, dict) or not all(
+            isinstance(gap.get(field), str) for field in ("skill", "free_resource")
+        ):
+            raise ValueError("A skill gap is missing required text.")
+        if any(
+            type(gap.get(field)) is not int or not 0 <= gap[field] <= 10
+            for field in ("current_level", "needed_level")
+        ):
+            raise ValueError("A skill gap has an invalid level.")
+    roadmap = plan.get("roadmap")
+    if not isinstance(roadmap, dict):
+        raise ValueError("The plan is missing its roadmap.")
+    for period in ("days_1_30", "days_31_60", "days_61_90"):
+        section = roadmap.get(period)
+        if (
+            not isinstance(section, dict)
+            or not isinstance(section.get("tasks"), list)
+            or len(section["tasks"]) != 3
+            or not all(isinstance(task, str) for task in section["tasks"])
+            or not isinstance(section.get("mini_project"), str)
+        ):
+            raise ValueError("Each roadmap period must include exactly three tasks.")
+    if not isinstance(plan.get("todays_action"), str) or not plan["todays_action"].strip():
+        raise ValueError("The plan is missing today's action.")
+    return plan
+
+
+def plan_as_markdown(plan):
+    lines = ["# My Career Plan", "", "## Do this today", plan["todays_action"], "", "## Roles that fit me"]
+    for role in plan["roles"]:
+        lines.extend([
+            "",
+            f"### {role['title']}",
+            f"**Match score:** {role['match_score']}%",
+            f"**Why it fits:** {role['why_it_fits']}",
+            f"**Indicative salary range:** {role['salary_range_lpa']} LPA",
+        ])
+    lines.extend(["", "## Skill gaps"])
+    for gap in plan["skill_gaps"]:
+        lines.append(
+            f"- **{gap['skill']}**: {gap['current_level']}/10 now, "
+            f"{gap['needed_level']}/10 target. Free resource: {gap['free_resource']}"
+        )
+    lines.extend(["", "## 90-day roadmap"])
+    for title, key in [
+        ("Days 1-30", "days_1_30"),
+        ("Days 31-60", "days_31_60"),
+        ("Days 61-90", "days_61_90"),
+    ]:
+        section = plan["roadmap"][key]
+        lines.extend(["", f"### {title}"])
+        lines.extend(f"- [ ] {task}" for task in section["tasks"])
+        lines.extend(["", f"**Mini project:** {section['mini_project']}"])
+    return "\n".join(lines)
+
 
 st.set_page_config(page_title="AI Career Planner", page_icon="🎯", layout="centered")
 
@@ -55,9 +222,17 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# The profile form, laid out in two columns
+# Step 1 lets people include a resume without saving it to disk.
+st.markdown('<div class="step">Step 1 · Resume (optional)</div>', unsafe_allow_html=True)
+resume = st.file_uploader("Upload your resume (PDF)", type=["pdf"])
+st.caption(
+    "Your resume is sent to Google Gemini to make your plan and is not stored by "
+    "this app. On Gemini's free tier Google may use it to improve its products."
+)
+
+# Step 2 collects the user's profile in the existing form.
 with st.form("profile"):
-    st.markdown('<div class="step">About you</div>', unsafe_allow_html=True)
+    st.markdown('<div class="step">Step 2 · About you</div>', unsafe_allow_html=True)
     left, right = st.columns(2)
     name = left.text_input("Your name")
     education = right.selectbox(
@@ -71,7 +246,8 @@ with st.form("profile"):
         horizontal=True,
     )
     left, right = st.columns(2)
-    skills = left.text_area("Skills you already have", placeholder="Excel, basic Python, communication...")
+    skills_label = "Skills you already have (optional with a resume)" if resume else "Skills you already have"
+    skills = left.text_area(skills_label, placeholder="Excel, basic Python, communication...")
     interests = right.text_area("What do you enjoy?", placeholder="Solving puzzles, design, talking to people...")
     goal = st.text_input("Your goal", placeholder="Get my first job in tech within 6 months")
     hours = st.slider("Hours per week you can study", 2, 40, 10)
@@ -83,12 +259,12 @@ if submitted:
         missing.append("**Your name**")
     if not goal.strip():
         missing.append("**Your goal**")
-    if not skills.strip():
+    if not skills.strip() and resume is None:
         missing.append("**Skills you already have**")
     if missing:
         st.warning("Please fill in: " + ", ".join(missing) + ".")
     else:
-        # Send the completed profile to Gemini
+        # Send the profile and optional PDF to Gemini from memory.
         profile = {
             "name": name,
             "education": education,
@@ -100,45 +276,22 @@ if submitted:
         }
 
         try:
-            client = genai.Client(
-                api_key=st.secrets["GEMINI_API_KEY"],
-                http_options=types.HttpOptions(api_version="v1beta"),
-            )
-            answer = None
-            last_error = None
-            models = [
-                ("gemini-3.5-flash-lite", 2),
-                ("gemini-2.5-flash-lite", 1),            ]
-
-            for model, attempts in models:
-                for attempt in range(attempts):
-                    try:
-                        with st.spinner("Thinking about your career..."):
-                            response = client.models.generate_content(
-                                model=model,
-                                contents=f"Here is my career profile:\n{profile}",
-                                config=types.GenerateContentConfig(
-                                    system_instruction=SYSTEM_PROMPT,
-                                    temperature=0.7,
-                                ),
-                            )
-                        answer = response.text
-                        break
-                    except errors.APIError as exc:
-                        last_error = exc
-                        if exc.code not in (404, 429, 500, 503, 504):
-                            raise
-                if answer:
-                    break
-
-            if not answer:
-                if isinstance(last_error, errors.APIError):
-                    raise last_error
-                raise RuntimeError(str(last_error or "Gemini returned no answer"))
-
-            st.session_state["career_plan"] = answer
-            with st.container(border=True):
-                st.markdown(answer)
+            client = create_gemini_client()
+            contents = [f"Here is my career profile:\n{json.dumps(profile)}"]
+            if resume is not None:
+                contents.append(
+                    types.Part.from_bytes(data=resume.getvalue(), mime_type="application/pdf")
+                )
+            with st.spinner("Thinking about your career..."):
+                answer = generate_text(
+                    client,
+                    contents,
+                    SYSTEM_PROMPT,
+                    response_schema=CAREER_PLAN_SCHEMA,
+                )
+            st.session_state["career_plan"] = parse_career_plan(answer)
+            st.session_state["career_plan_version"] = st.session_state.get("career_plan_version", 0) + 1
+            st.session_state["career_chat"] = []
         except KeyError:
             st.error("The Gemini API key is missing. Add it to .streamlit/secrets.toml and try again.")
         except errors.APIError as exc:
@@ -150,13 +303,107 @@ if submitted:
                 st.error("The Gemini model is not available for this API key. Please try again later.")
             else:
                 st.error("I couldn't create your career plan right now. Please try again in a moment.")
-        except Exception:
-            st.error("I couldn't create your career plan right now. Please try again in a moment.")
+        except (json.JSONDecodeError, ValueError):
+            st.error("Gemini returned a plan in an unexpected format. Please try again.")
 
-# Keep a successful plan visible after Streamlit reruns
-if not submitted and "career_plan" in st.session_state:
-    with st.container(border=True):
-        st.markdown(st.session_state["career_plan"])
+# The dashboard reads the saved plan so it stays visible after reruns.
+if "career_plan" in st.session_state and isinstance(st.session_state["career_plan"], dict):
+    plan = st.session_state["career_plan"]
+    st.success(f"**Do this today**\n\n{plan['todays_action']}")
+
+    role_columns = st.columns(3)
+    for column, role in zip(role_columns, plan["roles"]):
+        with column:
+            with st.container(border=True):
+                st.subheader(role["title"])
+                st.markdown(
+                    f'<div class="score">{role["match_score"]}<span> / 100</span></div>',
+                    unsafe_allow_html=True,
+                )
+                st.progress(role["match_score"])
+                st.write(role["why_it_fits"])
+                st.caption(f"Indicative salary: {role['salary_range_lpa']} LPA")
+
+    st.subheader("Skill gaps")
+    st.bar_chart(
+        {
+            "Skill": [gap["skill"] for gap in plan["skill_gaps"]],
+            "Current level": [gap["current_level"] for gap in plan["skill_gaps"]],
+            "Needed level": [gap["needed_level"] for gap in plan["skill_gaps"]],
+        },
+        x="Skill",
+        y=["Current level", "Needed level"],
+        horizontal=True,
+    )
+    for gap in plan["skill_gaps"]:
+        st.markdown(f"- **{gap['skill']}** — Free resource: {gap['free_resource']}")
+
+    st.subheader("Your 90-day roadmap")
+    roadmap_tabs = st.tabs(["Days 1-30", "Days 31-60", "Days 61-90"])
+    roadmap_periods = [
+        "days_1_30",
+        "days_31_60",
+        "days_61_90",
+    ]
+    plan_version = st.session_state.get("career_plan_version", 0)
+    for tab, period_key in zip(roadmap_tabs, roadmap_periods):
+        with tab:
+            section = plan["roadmap"][period_key]
+            for index, task in enumerate(section["tasks"]):
+                st.checkbox(task, key=f"task_{plan_version}_{period_key}_{index}")
+            with st.container(border=True):
+                st.markdown(f"**Mini project: {section['mini_project']}**")
+
+    st.download_button(
+        "Download my plan",
+        data=plan_as_markdown(plan),
+        file_name="my-career-plan.md",
+        mime="text/markdown",
+    )
+
+    # Follow-up answers use the saved plan and stay under 150 words.
+    st.subheader("Ask about your plan")
+    with st.form("plan_chat"):
+        question = st.text_input("Your question")
+        ask_submitted = st.form_submit_button("Ask")
+
+    if "career_chat" not in st.session_state:
+        st.session_state["career_chat"] = []
+    if ask_submitted and question.strip():
+        try:
+            client = create_gemini_client()
+            chat_context = (
+                "Answer the user's question using this career plan as context. "
+                "Use simple English, do not promise a job or salary, and answer in under 150 words.\n\n"
+                f"Career plan:\n{json.dumps(plan)}\n\nQuestion: {question.strip()}"
+            )
+            with st.spinner("Thinking about your question..."):
+                answer = generate_text(
+                    client,
+                    chat_context,
+                    "You are a helpful career counsellor.",
+                )
+            words = answer.split()
+            if len(words) > 149:
+                answer = " ".join(words[:149]) + "..."
+            st.session_state["career_chat"].append((question.strip(), answer))
+        except KeyError:
+            st.error("The Gemini API key is missing. Add it to .streamlit/secrets.toml and try again.")
+        except errors.APIError as exc:
+            if exc.code in (429, 500, 503, 504):
+                st.error("Gemini is busy or has reached its free limit. Please wait a moment and try again.")
+            elif exc.code in (401, 403):
+                st.error("The Gemini API key is not accepted. Check that it is a valid key and try again.")
+            else:
+                st.error("I couldn't answer that right now. Please try again in a moment.")
+        except ValueError:
+            st.error("Gemini returned an empty answer. Please try again.")
+
+    for user_question, assistant_answer in st.session_state["career_chat"]:
+        with st.chat_message("user"):
+            st.write(user_question)
+        with st.chat_message("assistant"):
+            st.write(assistant_answer)
 
 # Footer
 st.divider()
